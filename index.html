@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>Sky IP Checker</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#edf3ff;font:15px system-ui,Arial}
+main{max-width:850px;margin:auto;padding:20px}.panel{background:#131f32;border:1px solid #26364e;border-radius:16px;padding:16px;margin:14px 0}
+h1{margin:0;font-size:27px}.muted{color:#a9bad1;font-size:13px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{display:block;margin:10px 0 6px;color:#b8c9df}input,select,textarea{width:100%;background:#0b1525;color:white;border:1px solid #354966;border-radius:10px;padding:12px;font:inherit}
+textarea{min-height:170px;resize:vertical}button{background:#48a5ff;color:#061322;border:0;border-radius:10px;padding:13px 18px;font-weight:700;font-size:15px;width:100%;margin-top:12px}
+button:disabled{opacity:.5}.stats{display:flex;gap:10px;flex-wrap:wrap}.stat{background:#0b1525;border-radius:10px;padding:10px 14px;flex:1;min-width:90px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:9px;border-bottom:1px solid #2a3a51;overflow-wrap:anywhere}
+.good{color:#50e39a}.bad{color:#ff7777}.actions{display:flex;gap:8px}.actions button{width:auto;flex:1;background:#263c58;color:white}
+@media(max-width:520px){.grid{grid-template-columns:1fr}main{padding:13px}h1{font-size:23px}}
+</style></head>
+<body><main>
+<div class="panel">
+<h1>☁️ Sky IP Checker</h1><div class="muted">Personal proxy checker · সর্বোচ্চ ১০০০টি একসাথে</div>
+<label>Personal Access Key (হোস্টিংয়ে সেট করা থাকলে)</label><input id="key" type="password" placeholder="Access key">
+<div class="grid"><div><label>Proxy Protocol</label><select id="protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></div>
+<div><label>Concurrent checks (1–40)</label><input id="concurrency" type="number" min="1" max="40" value="30"></div></div>
+<label>Proxy list (প্রতি লাইনে একটি IP:PORT)</label>
+<textarea id="proxies" placeholder="1.2.3.4:8080&#10;5.6.7.8:1080&#10;username:password@9.8.7.6:3128"></textarea>
+<div class="muted">চাইলে লাইনে protocol://IP:PORT লিখতে পারো। Credentials থাকলে তালিকাটি ব্যক্তিগত রাখবে।</div>
+<button id="start" onclick="startCheck()">Check Proxies</button>
+</div>
+<div class="panel">
+<div class="stats"><div class="stat">Progress<br><b id="progress">0 / 0</b></div><div class="stat">Working<br><b class="good" id="working">0</b></div><div class="stat">Dead<br><b class="bad" id="dead">0</b></div></div>
+<p id="status" class="muted">Ready</p>
+<div class="actions"><button onclick="exportWorking()">Export Working TXT</button><button onclick="clearResults()">Clear results</button></div>
+</div>
+<div class="panel"><b>Results</b><div style="overflow:auto;margin-top:10px"><table><thead><tr><th>Proxy</th><th>Status</th><th>Time</th><th>Exit IP</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+<div class="muted">পরীক্ষায় একটি HTTPS test endpoint ব্যবহার হয়। কোনো proxy ব্যর্থ হলে সেটি dead দেখাতে পারে, যদিও অন্য destination-এ সেটি কাজ করতে পারে।</div>
+</main>
+<script>
+let results=[], pollTimer=null;
+const key=()=>document.getElementById('key').value;
+function headers(){return {'Content-Type':'application/json','X-API-Key':key()}}
+async function startCheck(){
+ const lines=document.getElementById('proxies').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+ if(!lines.length){alert('প্রতি লাইনে একটি proxy দিন');return}
+ if(lines.length>1000){alert('একবারে সর্বোচ্চ ১০০০টি');return}
+ const btn=document.getElementById('start');btn.disabled=true;
+ results=[];render();document.getElementById('status').textContent='Job তৈরি হচ্ছে...';
+ try{
+  const r=await fetch('/api/jobs',{method:'POST',headers:headers(),body:JSON.stringify({proxies:lines,protocol:document.getElementById('protocol').value,concurrency:Number(document.getElementById('concurrency').value)||30})});
+  if(!r.ok)throw new Error((await r.text()).slice(0,250));
+  const {job_id}=await r.json();document.getElementById('status').textContent='Checking...';
+  pollTimer=setInterval(()=>poll(job_id),1800);await poll(job_id);
+ }catch(e){document.getElementById('status').textContent='Error: '+e.message;btn.disabled=false}
+}
+async function poll(id){
+ try{
+  const r=await fetch('/api/jobs/'+id,{headers:headers()});if(!r.ok)throw new Error(await r.text());
+  const j=await r.json();results=j.results||[];render();
+  document.getElementById('progress').textContent=j.completed+' / '+j.total;
+  document.getElementById('status').textContent=j.state==='done'?'Completed':'Checking proxies...';
+  if(j.state==='done'){clearInterval(pollTimer);document.getElementById('start').disabled=false;saveWorking();}
+ }catch(e){clearInterval(pollTimer);document.getElementById('status').textContent='Error: '+e.message;document.getElementById('start').disabled=false}
+}
+function render(){
+ const good=results.filter(x=>x.status==='working');document.getElementById('working').textContent=good.length;document.getElementById('dead').textContent=results.length-good.length;
+ document.getElementById('rows').innerHTML=results.map(x=>`<tr><td>${esc(x.proxy)}</td><td class="${x.status==='working'?'good':'bad'}">${x.status}</td><td>${x.response_ms} ms</td><td>${esc(x.exit_ip||'—')}</td></tr>`).join('');
+}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function saveWorking(){try{let old=JSON.parse(localStorage.getItem('sky-working')||'[]');let merged=[...new Set([...old,...results.filter(x=>x.status==='working').map(x=>x.proxy)])];localStorage.setItem('sky-working',JSON.stringify(merged))}catch(e){}}
+function exportWorking(){let saved=JSON.parse(localStorage.getItem('sky-working')||'[]');let now=results.filter(x=>x.status==='working').map(x=>x.proxy);let all=[...new Set([...saved,...now])];if(!all.length){alert('কোনো Working IP নেই');return}let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([all.join('\n')],{type:'text/plain'}));a.download='sky-working-proxies.txt';a.click();URL.revokeObjectURL(a.href)}
+function clearResults(){results=[];render();document.getElementById('progress').textContent='0 / 0';document.getElementById('status').textContent='Cleared'}
+</script></body></html>
